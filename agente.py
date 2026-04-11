@@ -1,131 +1,202 @@
 import os
 import json
+import re
+from datetime import datetime
 from groq import Groq
 from dotenv import load_dotenv
-from herramientas import buscar_carta_pokemon, analizar_tendencia_inversion
+from herramientas import buscar_carta_pokemon, analizar_tendencia_inversion, buscar_en_internet
 
 load_dotenv()
-cliente = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
-# Definicion de herramientas
-prop_buscar = dict()
-prop_buscar["type"] = "string"
-prop_buscar["description"] = "Nombre de la carta de Pokemon"
+# Definición de tools permitidas para el LLM
+HERRAMIENTAS_DISPONIBLES = [
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_carta_pokemon",
+            "description": "Busca datos en bruto de una carta Pokémon en la API oficial.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre_carta": {"type": "string", "description": "Nombre de la carta Pokémon a buscar"}
+                },
+                "required": ["nombre_carta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analizar_tendencia_inversion",
+            "description": "Ejecutar al solicitar análisis de inversión, históricos o valores PSA/BGS.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "nombre_carta": {"type": "string", "description": "Nombre de la carta para analizar su inversión"}
+                },
+                "required": ["nombre_carta"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "buscar_en_internet",
+            "description": "Buscar en internet noticias, ganadores de torneos o novedades.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "consulta": {"type": "string", "description": "Término de búsqueda (ej. noticias, campeonatos, torneos)"}
+                },
+                "required": ["consulta"]
+            }
+        }
+    }
+]
 
-props_1 = dict()
-props_1["nombre_carta"] = prop_buscar
+class AgenteTCG:
+    def __init__(self):
+        self.cliente = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+        
+        # Inyectamos el año actual en el contexto para evitar alucinaciones temporales
+        fecha_actual = datetime.now().strftime("%Y")
+        
+        self.mensajes_chat = [
+            {"role": "system", "content": f"""Rol: Analista financiero experto en Pokémon TCG.
+Contexto: El año actual es {fecha_actual}.
 
-params_1 = dict()
-params_1["type"] = "object"
-params_1["properties"] = props_1
-params_1["required"] = list(["nombre_carta"])
+Reglas Críticas de Ejecución (Si rompes una, fallas el sistema):
+1. PROHIBIDO derivar la búsqueda al usuario, sugerir páginas web o decir "busca en internet". Tú debes dar la respuesta final.
+2. Anclaje temporal: Al buscar el "último" mundial o evento, busca explícitamente "ganador mundial pokemon tcg 2024" (último evento con datos web estables), a menos que el usuario pida otro año.
+3. Si la búsqueda web no devuelve el dato exacto (ej. falta el mazo del ganador), ESTÁS OBLIGADO a iterar y ejecutar otra Tool Call con términos diferentes.
+4. Obligatorio invocar las herramientas mediante Tool Calls. No imprimir la intención de búsqueda en texto plano.
+5. Tras usar 'buscar_en_internet', procesar los datos y redactar una respuesta natural. No devolver los enlaces ni el texto en bruto."""}
+        ]
 
-func_1 = dict()
-func_1["name"] = "buscar_carta_pokemon"
-func_1["description"] = "Busca datos generales y precio base actual de una carta"
-func_1["parameters"] = params_1
+    def preguntar_a_ia(self, pregunta_usuario: str) -> str:
+        self.mensajes_chat.append({"role": "user", "content": pregunta_usuario})
 
-herr_1 = dict()
-herr_1["type"] = "function"
-herr_1["function"] = func_1
-
-prop_inversion = dict()
-prop_inversion["type"] = "string"
-prop_inversion["description"] = "Nombre de la carta para analizar su inversion"
-
-props_2 = dict()
-props_2["nombre_carta"] = prop_inversion
-
-params_2 = dict()
-params_2["type"] = "object"
-params_2["properties"] = props_2
-params_2["required"] = list(["nombre_carta"])
-
-func_2 = dict()
-func_2["name"] = "analizar_tendencia_inversion"
-func_2["description"] = "Ejecutar al solicitar analisis de inversion, historicos o valores PSA/BGS."
-func_2["parameters"] = params_2
-
-herr_2 = dict()
-herr_2["type"] = "function"
-herr_2["function"] = func_2
-
-herramientas_disponibles = list([herr_1, herr_2])
-mensajes_chat = list()
-
-# System Prompt Profesional
-mensaje_sistema = dict()
-mensaje_sistema["role"] = "system"
-mensaje_sistema["content"] = "Actua como un script de terminal enfocado en TCG Pokemon. No uses saludos, despedidas ni lenguaje conversacional. Devuelve unicamente los datos procesados, listas y valores numericos. Transcribe la informacion de las herramientas directamente."
-mensajes_chat.append(mensaje_sistema)
-
-def preguntar_a_ia(pregunta_usuario):
-    nuevo_mensaje = dict()
-    nuevo_mensaje["role"] = "user"
-    nuevo_mensaje["content"] = pregunta_usuario
-    mensajes_chat.append(nuevo_mensaje)
-
-    respuesta = cliente.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=mensajes_chat,
-        tools=herramientas_disponibles,
-        tool_choice="auto"
-    )
-    
-    cero = int("0")
-    mensaje_ia = respuesta.choices[cero].message
-    
-    if mensaje_ia.tool_calls:
-        for tool_call in mensaje_ia.tool_calls:
-            argumentos = json.loads(tool_call.function.arguments)
-            nombre_a_buscar = argumentos.get("nombre_carta")
-            
-            if tool_call.function.name == "buscar_carta_pokemon":
-                resultado_datos = buscar_carta_pokemon(nombre_a_buscar)
-            elif tool_call.function.name == "analizar_tendencia_inversion":
-                resultado_datos = analizar_tendencia_inversion(nombre_a_buscar)
-            
-            mensajes_chat.append(mensaje_ia)
-            
-            mensaje_herramienta = dict()
-            mensaje_herramienta["tool_call_id"] = tool_call.id
-            mensaje_herramienta["role"] = "tool"
-            mensaje_herramienta["name"] = tool_call.function.name
-            mensaje_herramienta["content"] = str(resultado_datos)
-            mensajes_chat.append(mensaje_herramienta)
-            
-            respuesta_final = cliente.chat.completions.create(
+        try:
+            respuesta = self.cliente.chat.completions.create(
                 model="llama-3.3-70b-versatile",
-                messages=mensajes_chat
+                messages=self.mensajes_chat,
+                tools=HERRAMIENTAS_DISPONIBLES,
+                tool_choice="auto"
             )
             
-            respuesta_texto = respuesta_final.choices[cero].message.content
+            # choices devuelve una lista, extraemos el primer mensaje
+            mensaje_ia = respuesta.choices[0].message
             
-            mensaje_asistente = dict()
-            mensaje_asistente["role"] = "assistant"
-            mensaje_asistente["content"] = respuesta_texto
-            mensajes_chat.append(mensaje_asistente)
+            if getattr(mensaje_ia, 'tool_calls', None):
+                for tool_call in mensaje_ia.tool_calls:
+                    argumentos = json.loads(tool_call.function.arguments)
+                    
+                    if tool_call.function.name == "buscar_carta_pokemon":
+                        resultado_datos = buscar_carta_pokemon(argumentos.get("nombre_carta"))
+                    elif tool_call.function.name == "analizar_tendencia_inversion":
+                        resultado_datos = analizar_tendencia_inversion(argumentos.get("nombre_carta"))
+                    elif tool_call.function.name == "buscar_en_internet":
+                        resultado_datos = buscar_en_internet(argumentos.get("consulta"))
+                    else:
+                        resultado_datos = "Herramienta desconocida."
+                    
+                    self.mensajes_chat.append(mensaje_ia)
+                    self.mensajes_chat.append({
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": tool_call.function.name,
+                        "content": str(resultado_datos)
+                    })
+                    
+                    respuesta_final = self.cliente.chat.completions.create(
+                        model="llama-3.3-70b-versatile",
+                        messages=self.mensajes_chat
+                    )
+                    
+                    respuesta_texto = respuesta_final.choices[0].message.content
+                    self.mensajes_chat.append({"role": "assistant", "content": respuesta_texto})
+                    return respuesta_texto
+                    
+            respuesta_texto_normal = mensaje_ia.content
             
-            return respuesta_texto
+            # FIX 1: Llama3 a veces falla al generar el JSON del tool_call y escupe XML o texto plano.
+            # Capturamos la intención con regex para no perder el hilo.
+            if respuesta_texto_normal and ('buscar_en_internet' in respuesta_texto_normal.lower() or '<function' in respuesta_texto_normal):
+                busqueda = re.search(r'consulta["\'\s:={\\]+([^"\'\}]+)', respuesta_texto_normal, re.IGNORECASE)
+                
+                if busqueda:
+                    print("[*] Recuperando tool call malformado de Llama...")
+                    termino_busqueda = busqueda.group(1).strip()
+                    resultado_datos = buscar_en_internet(termino_busqueda)
+                    
+                    # Limpiamos tags <function> sueltos para no ensuciar el historial
+                    texto_limpio = re.sub(r'<[^>]+>', '', respuesta_texto_normal).strip() 
+                    if not texto_limpio or "{" in texto_limpio:
+                        texto_limpio = f"Ampliando información sobre: {termino_busqueda}"
+                        
+                    self.mensajes_chat.append({"role": "assistant", "content": texto_limpio})
+                    self.mensajes_chat.append({"role": "user", "content": f"Resultados web: {resultado_datos}\nSintetiza esto y dame una respuesta directa."})
+                    
+                    r_final = self.cliente.chat.completions.create(model="llama-3.3-70b-versatile", messages=self.mensajes_chat)
+                    txt_final = r_final.choices[0].message.content
+                    self.mensajes_chat.append({"role": "assistant", "content": txt_final})
+                    return txt_final
+                    
+            self.mensajes_chat.append({"role": "assistant", "content": respuesta_texto_normal})
+            return respuesta_texto_normal
+
+        # FIX 2: Groq lanza 400 Bad Request si el array de mensajes tiene una secuencia no válida.
+        except Exception as e:
+            error_str = str(e)
+            print(f"[!] Error de API. Posible estado corrupto, ejecutando rollback...")
             
-    respuesta_texto_normal = mensaje_ia.content
-    
-    mensaje_asistente_normal = dict()
-    mensaje_asistente_normal["role"] = "assistant"
-    mensaje_asistente_normal["content"] = respuesta_texto_normal
-    mensajes_chat.append(mensaje_asistente_normal)
-    
-    return respuesta_texto_normal
+            # Hacemos pop() del último input para no envenenar el contexto
+            if self.mensajes_chat and self.mensajes_chat[-1]["role"] == "user":
+                pregunta_original = self.mensajes_chat.pop()["content"]
+            else:
+                pregunta_original = "Sintetiza la información obtenida en la última consulta."
+                
+            if "failed_generation" in error_str:
+                busqueda = re.search(r'"consulta":\s*"([^"]+)"', error_str)
+                if busqueda:
+                    print("[*] Relanzando búsqueda desde los logs...")
+                    resultado_datos = buscar_en_internet(busqueda.group(1))
+                    
+                    # Contexto temporal para no romper la memoria principal
+                    mensajes_temporales = self.mensajes_chat.copy()
+                    mensajes_temporales.append({
+                        "role": "user", 
+                        "content": f"Usuario: '{pregunta_original}'.\nDatos extraídos: \n{resultado_datos}\n\nGenera una respuesta con estos datos sin incluir los enlaces."
+                    })
+                    
+                    r_final = self.cliente.chat.completions.create(model="llama-3.3-70b-versatile", messages=mensajes_temporales)
+                    txt_final = r_final.choices[0].message.content
+                    
+                    self.mensajes_chat.append({"role": "user", "content": pregunta_original})
+                    self.mensajes_chat.append({"role": "assistant", "content": txt_final})
+                    
+                    return txt_final
+            
+            return f"Error crítico (400). El contexto se ha reiniciado por seguridad. Log: {error_str[:60]}..."
 
 if __name__ == "__main__":
-    print("TCG Agent CLI v1.0.0")
-    print("Type 'exit' to quit.\n")
+    print("TCG Agent CLI v1.3.0")
+    print("Escribe 'exit' para salir.\n")
+    
+    agente = AgenteTCG()
     
     while True:
-        mi_pregunta = input("> ")
-        
-        if mi_pregunta.lower() in ["salir", "exit", "quit"]:
-            break
+        try:
+            mi_pregunta = input("> ")
+            if mi_pregunta.lower() in ("salir", "exit", "quit"):
+                print("\n[*] Cerrando sesión...")
+                break
             
-        respuesta_agente = preguntar_a_ia(mi_pregunta)
-        print(f"\n{respuesta_agente}\n")
+            if not mi_pregunta.strip():
+                continue
+                
+            print(f"\n{agente.preguntar_a_ia(mi_pregunta)}\n")
+            
+        except KeyboardInterrupt:
+            print("\n\n[*] Ejecución interrumpida por el usuario.")
+            break
