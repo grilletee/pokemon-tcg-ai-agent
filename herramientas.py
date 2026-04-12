@@ -51,7 +51,41 @@ def buscar_carta_pokemon(nombre_carta: str) -> str:
         return f"Error HTTP o Timeout: {str(e)}"
 
 def analizar_tendencia_inversion(nombre_carta: str) -> str:
-    return buscar_carta_pokemon(nombre_carta)
+    print(f"[*] Analizando mercado real e histórico para: {nombre_carta}")
+    
+    # 1. Extraemos los datos base para saber de qué carta exacta hablamos (Set, Rareza, Precio Raw)
+    datos_base = buscar_carta_pokemon(nombre_carta)
+    
+    # Si la carta no existe, cortamos la ejecución
+    if "Sin resultados" in datos_base or "Error" in datos_base:
+        return datos_base
+        
+    # Extraemos solo la primera línea de datos_base para hacer la búsqueda precisa (ej. Charizard Base Set)
+    # Esto es un truco para que el LLM busque la carta correcta y no una versión barata.
+    lineas = datos_base.split('\n')
+    info_clave_carta = ""
+    for linea in lineas:
+        if "Nombre:" in linea or "Set:" in linea:
+            info_clave_carta += linea.split(':')[-1].strip() + " "
+            
+    termino_busqueda = f"{info_clave_carta} PSA 10 sold price PriceCharting"
+    
+    print(f"[*] Cruzando datos con mercado secundario: {termino_busqueda}")
+    
+    # 2. Hacemos una búsqueda web dirigida para extraer ventas reales de cartas gradadas
+    datos_mercado = buscar_en_internet(termino_busqueda)
+    
+    # 3. Le entregamos al LLM el paquete completo de información real
+    reporte_financiero = f"""
+--- DATOS DE LA API OFICIAL (CARTAS SIN GRADEAR) ---
+{datos_base}
+
+--- DATOS DE MERCADO SECUNDARIO (BUSQUEDA EN TIEMPO REAL) ---
+{datos_mercado}
+
+Instrucción interna para el Agente: Analiza ambos bloques de datos. Compara el precio 'Raw' con los resultados encontrados en internet para versiones PSA/BGS. Si no encuentras el precio exacto de PSA en internet, DILO CLARAMENTE, no te inventes las matemáticas.
+"""
+    return reporte_financiero
 
 def buscar_en_internet(consulta: str) -> str:
     print(f"[*] Buscando en DuckDuckGo: {consulta}")

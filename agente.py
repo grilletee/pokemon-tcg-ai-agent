@@ -18,7 +18,7 @@ HERRAMIENTAS_DISPONIBLES = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "nombre_carta": {"type": "string", "description": "Nombre de la carta Pokémon a buscar"}
+                    "nombre_carta": {"type": "string", "description": "SOLO el nombre del Pokémon (ej. 'Charizard'). NUNCA incluyas el nombre del set aquí."}
                 },
                 "required": ["nombre_carta"]
             }
@@ -28,11 +28,11 @@ HERRAMIENTAS_DISPONIBLES = [
         "type": "function",
         "function": {
             "name": "analizar_tendencia_inversion",
-            "description": "Ejecutar al solicitar análisis de inversión, históricos o valores PSA/BGS.",
+            "description": "Herramienta financiera suprema. Úsala para calcular el valor real, histórico y gradado (PSA/BGS) de una carta. Cruza la API con datos reales de internet.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "nombre_carta": {"type": "string", "description": "Nombre de la carta para analizar su inversión"}
+                    "nombre_carta": {"type": "string", "description": "SOLO el nombre del Pokémon (ej. 'Charizard'). NUNCA incluyas el nombre del set aquí."}
                 },
                 "required": ["nombre_carta"]
             }
@@ -70,7 +70,8 @@ Reglas Críticas de Ejecución (Si rompes una, fallas el sistema):
 2. Anclaje temporal: Al buscar el "último" mundial o evento, busca explícitamente "ganador mundial pokemon tcg 2024" (último evento con datos web estables), a menos que el usuario pida otro año.
 3. Si la búsqueda web no devuelve el dato exacto (ej. falta el mazo del ganador), ESTÁS OBLIGADO a iterar y ejecutar otra Tool Call con términos diferentes.
 4. Obligatorio invocar las herramientas mediante Tool Calls. No imprimir la intención de búsqueda en texto plano.
-5. Tras usar 'buscar_en_internet', procesar los datos y redactar una respuesta natural. No devolver los enlaces ni el texto en bruto."""}
+5. Tras usar 'buscar_en_internet', procesar los datos y redactar una respuesta natural. No devolver los enlaces ni el texto en bruto.
+6. Manejo de errores: Si el usuario escribe algo incomprensible, un error tipográfico (ej. "salor") o un saludo básico, NO ejecutes ninguna herramienta. Responde simplemente pidiendo que aclare la pregunta."""}
         ]
 
     def preguntar_a_ia(self, pregunta_usuario: str) -> str:
@@ -119,23 +120,34 @@ Reglas Críticas de Ejecución (Si rompes una, fallas el sistema):
                     
             respuesta_texto_normal = mensaje_ia.content
             
-            # FIX 1: Llama3 a veces falla al generar el JSON del tool_call y escupe XML o texto plano.
-            # Capturamos la intención con regex para no perder el hilo.
+            # FIX 1: Alucinación de Tool Call (Texto plano o XML de Llama)
             if respuesta_texto_normal and ('buscar_en_internet' in respuesta_texto_normal.lower() or '<function' in respuesta_texto_normal):
-                busqueda = re.search(r'consulta["\'\s:={\\]+([^"\'\}]+)', respuesta_texto_normal, re.IGNORECASE)
+                termino_busqueda = ""
                 
-                if busqueda:
-                    print("[*] Recuperando tool call malformado de Llama...")
-                    termino_busqueda = busqueda.group(1).strip()
+                # Si usa el formato XML nativo de Llama (como el bug del Charizard)
+                if '<function' in respuesta_texto_normal:
+                    match = re.search(r'<function[^>]*>(.*?)</function>', respuesta_texto_normal, re.IGNORECASE)
+                    if match:
+                        # Limpiamos todos los símbolos de programación raros (+, comillas, paréntesis)
+                        termino_busqueda = re.sub(r'["\'\+\(\)\{\}\[\]:=]', ' ', match.group(1)).strip()
+                        termino_busqueda = termino_busqueda.replace("consulta", "").strip()
+                
+                # Si usa el formato de texto plano clásico
+                else:
+                    busqueda = re.search(r'consulta["\'\s:={\\]+([^"\'\}]+)', respuesta_texto_normal, re.IGNORECASE)
+                    if busqueda:
+                        termino_busqueda = busqueda.group(1).strip()
+                
+                if termino_busqueda:
+                    print(f"[*] Caza de alucinación XML exitosa. Buscando: {termino_busqueda}")
                     resultado_datos = buscar_en_internet(termino_busqueda)
                     
-                    # Limpiamos tags <function> sueltos para no ensuciar el historial
                     texto_limpio = re.sub(r'<[^>]+>', '', respuesta_texto_normal).strip() 
-                    if not texto_limpio or "{" in texto_limpio:
-                        texto_limpio = f"Ampliando información sobre: {termino_busqueda}"
+                    if not texto_limpio or "{" in texto_limpio or "(" in texto_limpio:
+                        texto_limpio = f"Ampliando información de mercado sobre: {termino_busqueda}"
                         
                     self.mensajes_chat.append({"role": "assistant", "content": texto_limpio})
-                    self.mensajes_chat.append({"role": "user", "content": f"Resultados web: {resultado_datos}\nSintetiza esto y dame una respuesta directa."})
+                    self.mensajes_chat.append({"role": "user", "content": f"Resultados web: {resultado_datos}\nSintetiza esto y dame una respuesta directa basada en los precios reales."})
                     
                     r_final = self.cliente.chat.completions.create(model="llama-3.3-70b-versatile", messages=self.mensajes_chat)
                     txt_final = r_final.choices[0].message.content
@@ -188,7 +200,8 @@ if __name__ == "__main__":
     while True:
         try:
             mi_pregunta = input("> ")
-            if mi_pregunta.lower() in ("salir", "exit", "quit"):
+            # Hemos añadido los errores tipográficos más comunes
+            if mi_pregunta.lower() in ("salir", "exit", "quit", "salor", "sañir", "q", "sair", "exir", "salr"):
                 print("\n[*] Cerrando sesión...")
                 break
             
