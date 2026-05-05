@@ -1,0 +1,533 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TCG Agent — Analista Pokémon</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Rajdhani:wght@400;600;700&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      --bg:              #0a0a0f;
+      --bg-panel:        #0f0f1a;
+      --bg-bubble-agent: #131326;
+      --bg-bubble-user:  #1c1c10;
+      --accent:          #f5c518;
+      --accent-dim:      #a88a10;
+      --text:            #e8e8e8;
+      --text-muted:      #6b6b80;
+      --border:          #1e1e32;
+      --font-mono:       'Share Tech Mono', monospace;
+      --font-ui:         'Rajdhani', sans-serif;
+      --radius:          6px;
+      --inner:           860px; /* ancho máximo del contenido interior */
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: var(--font-mono);
+      overflow: hidden;
+    }
+
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)' opacity='0.03'/%3E%3C/svg%3E");
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* ── Layout principal: ocupa toda la pantalla ── */
+    #app {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    /* ── Helper: centra el contenido interior a --inner ── */
+    .inner {
+      width: 100%;
+      max-width: var(--inner);
+      margin: 0 auto;
+    }
+
+    /* ── Header: fondo completo, contenido centrado ── */
+    header {
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+      padding: 0 24px;
+    }
+
+    header .inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 18px 0;
+    }
+
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .pokeball { width: 32px; height: 32px; flex-shrink: 0; }
+
+    .logo-text { display: flex; flex-direction: column; line-height: 1; }
+
+    .logo-title {
+      font-family: var(--font-ui);
+      font-weight: 700;
+      font-size: 1.2rem;
+      letter-spacing: 0.12em;
+      color: var(--accent);
+      text-transform: uppercase;
+    }
+
+    .logo-sub {
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      letter-spacing: 0.08em;
+      margin-top: 3px;
+    }
+
+    .header-actions { display: flex; align-items: center; gap: 12px; }
+
+    .status-dot {
+      width: 7px; height: 7px;
+      border-radius: 50%;
+      background: #2ecc71;
+      box-shadow: 0 0 6px #2ecc71;
+      animation: pulse-dot 2s infinite;
+    }
+
+    @keyframes pulse-dot {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    .btn-new {
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      letter-spacing: 0.08em;
+      color: var(--text-muted);
+      background: transparent;
+      border: 1px solid var(--border);
+      padding: 6px 12px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: color 0.2s, border-color 0.2s;
+      text-transform: uppercase;
+    }
+
+    .btn-new:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+    /* ── Chat: fondo oscuro completo, scroll interior ── */
+    #chat {
+      flex: 1;
+      overflow-y: auto;
+      background: var(--bg);
+      padding: 28px 24px;
+    }
+
+    #chat .inner {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      min-height: 100%;
+    }
+
+    #chat::-webkit-scrollbar { width: 4px; }
+    #chat::-webkit-scrollbar-track { background: transparent; }
+    #chat::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+    /* ── Burbujas ── */
+    .msg {
+      display: flex;
+      flex-direction: column;
+      max-width: 78%;
+      animation: fade-up 0.25s ease forwards;
+      opacity: 0;
+    }
+
+    @keyframes fade-up {
+      from { opacity: 0; transform: translateY(8px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    .msg.user  { align-self: flex-end;  align-items: flex-end; }
+    .msg.agent { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 0.6rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 5px;
+    }
+
+    .msg.user .msg-label { color: var(--accent-dim); }
+
+    .msg-bubble {
+      padding: 12px 16px;
+      border-radius: var(--radius);
+      font-size: 0.85rem;
+      line-height: 1.65;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    .msg.user .msg-bubble {
+      background: var(--bg-bubble-user);
+      border: 1px solid #2a2a18;
+      border-bottom-right-radius: 2px;
+      color: #d4d4aa;
+    }
+
+    .msg.agent .msg-bubble {
+      background: var(--bg-bubble-agent);
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 2px;
+      color: var(--text);
+    }
+
+    /* ── Typing indicator ── */
+    .typing {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 0;
+      animation: fade-up 0.2s ease forwards;
+      opacity: 0;
+    }
+
+    .typing-ball { width: 22px; height: 22px; animation: spin 1s linear infinite; }
+
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to   { transform: rotate(360deg); }
+    }
+
+    .typing-text { font-size: 0.7rem; color: var(--text-muted); letter-spacing: 0.08em; }
+
+    .typing-dots::after {
+      content: '';
+      animation: dots 1.2s steps(3, end) infinite;
+    }
+
+    @keyframes dots {
+      0%   { content: ''; }
+      33%  { content: '.'; }
+      66%  { content: '..'; }
+      100% { content: '...'; }
+    }
+
+    /* ── Bienvenida ── */
+    .welcome {
+      margin: auto;
+      text-align: center;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+      opacity: 0.7;
+    }
+
+    .welcome svg { width: 56px; height: 56px; }
+
+    .welcome-title {
+      font-family: var(--font-ui);
+      font-weight: 700;
+      font-size: 1.1rem;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--accent);
+    }
+
+    .welcome-sub {
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      line-height: 1.7;
+      max-width: 380px;
+    }
+
+    /* ── Footer: fondo completo, contenido centrado ── */
+    footer {
+      background: var(--bg-panel);
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      padding: 0 24px;
+    }
+
+    footer .inner {
+      padding: 16px 0 20px;
+    }
+
+    .input-row { display: flex; gap: 10px; align-items: flex-end; }
+
+    #input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      padding: 11px 14px;
+      resize: none;
+      outline: none;
+      max-height: 120px;
+      transition: border-color 0.2s;
+      line-height: 1.5;
+    }
+
+    #input:focus { border-color: var(--accent-dim); }
+    #input::placeholder { color: var(--text-muted); }
+
+    #send {
+      background: var(--accent);
+      border: none;
+      border-radius: var(--radius);
+      width: 42px;
+      height: 42px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      transition: background 0.2s, transform 0.1s;
+    }
+
+    #send:hover  { background: #d4aa14; }
+    #send:active { transform: scale(0.95); }
+    #send:disabled { background: var(--border); cursor: not-allowed; }
+    #send svg { width: 18px; height: 18px; fill: #0a0a0f; }
+
+    .input-hint {
+      font-size: 0.6rem;
+      color: var(--text-muted);
+      margin-top: 7px;
+      letter-spacing: 0.06em;
+    }
+  </style>
+</head>
+
+<body>
+<div id="app">
+
+  <header>
+    <div class="inner">
+      <div class="logo">
+        <svg class="pokeball" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="50" cy="50" r="46" stroke="#f5c518" stroke-width="3"/>
+          <path d="M4 50 Q4 4 50 4 Q96 4 96 50" fill="#f5c518" opacity="0.15"/>
+          <line x1="4" y1="50" x2="96" y2="50" stroke="#f5c518" stroke-width="3"/>
+          <circle cx="50" cy="50" r="12" fill="#0a0a0f" stroke="#f5c518" stroke-width="3"/>
+          <circle cx="50" cy="50" r="5" fill="#f5c518"/>
+        </svg>
+        <div class="logo-text">
+          <span class="logo-title">TCG Agent</span>
+          <span class="logo-sub">Analista Financiero · Pokémon TCG</span>
+        </div>
+      </div>
+      <div class="header-actions">
+        <div class="status-dot" title="Servidor activo"></div>
+        <button class="btn-new" onclick="nuevaConversacion()">[ Nueva sesión ]</button>
+      </div>
+    </div>
+  </header>
+
+  <div id="chat">
+    <div class="inner">
+      <div class="welcome" id="welcome">
+        <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <circle cx="50" cy="50" r="46" stroke="#f5c518" stroke-width="2" opacity="0.4"/>
+          <path d="M4 50 Q4 4 50 4 Q96 4 96 50" fill="#f5c518" opacity="0.08"/>
+          <line x1="4" y1="50" x2="96" y2="50" stroke="#f5c518" stroke-width="2" opacity="0.4"/>
+          <circle cx="50" cy="50" r="12" fill="#0a0a0f" stroke="#f5c518" stroke-width="2" opacity="0.4"/>
+          <circle cx="50" cy="50" r="5" fill="#f5c518" opacity="0.4"/>
+        </svg>
+        <div class="welcome-title">Sistema listo</div>
+        <div class="welcome-sub">
+          Pregunta sobre el valor de tus cartas, tendencias de inversión,<br/>
+          estrategias de torneo o cualquier dato de tu colección privada.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>
+    <div class="inner">
+      <div class="input-row">
+        <textarea
+          id="input"
+          rows="1"
+          placeholder="¿Cuánto vale mi Charizard Base Set raw?..."
+          autocomplete="off"
+          spellcheck="false"
+        ></textarea>
+        <button id="send" onclick="enviar()" title="Enviar">
+          <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+            <path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/>
+          </svg>
+        </button>
+      </div>
+      <div class="input-hint">Enter para enviar · Shift+Enter para nueva línea</div>
+    </div>
+  </footer>
+
+</div>
+
+<script>
+  const API_URL = 'http://localhost:8000';
+
+  let sessionId = '';
+  let esperando = false;
+
+  const chatEl    = document.getElementById('chat');
+  const inputEl   = document.getElementById('input');
+  const sendBtn   = document.getElementById('send');
+
+  function getInner() {
+    return chatEl.querySelector('.inner');
+  }
+
+  inputEl.addEventListener('input', () => {
+    inputEl.style.height = 'auto';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, 120) + 'px';
+  });
+
+  inputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      enviar();
+    }
+  });
+
+  function agregarMensaje(texto, rol) {
+    const welcome = document.getElementById('welcome');
+    if (welcome) welcome.remove();
+
+    const div = document.createElement('div');
+    div.className = `msg ${rol}`;
+    div.innerHTML = `
+      <div class="msg-label">${rol === 'user' ? '// tú' : '// agente'}</div>
+      <div class="msg-bubble">${escaparHTML(texto)}</div>
+    `;
+    getInner().appendChild(div);
+    scrollAbajo();
+  }
+
+  function mostrarTyping() {
+    const div = document.createElement('div');
+    div.className = 'typing';
+    div.id = 'typing';
+    div.innerHTML = `
+      <svg class="typing-ball" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <circle cx="50" cy="50" r="46" stroke="#f5c518" stroke-width="4"/>
+        <path d="M4 50 Q4 4 50 4 Q96 4 96 50" fill="#f5c518" opacity="0.2"/>
+        <line x1="4" y1="50" x2="96" y2="50" stroke="#f5c518" stroke-width="4"/>
+        <circle cx="50" cy="50" r="12" fill="#0a0a0f" stroke="#f5c518" stroke-width="4"/>
+        <circle cx="50" cy="50" r="5" fill="#f5c518"/>
+      </svg>
+      <span class="typing-text">Analizando<span class="typing-dots"></span></span>
+    `;
+    getInner().appendChild(div);
+    scrollAbajo();
+  }
+
+  function ocultarTyping() {
+    const el = document.getElementById('typing');
+    if (el) el.remove();
+  }
+
+  async function enviar() {
+    const texto = inputEl.value.trim();
+    if (!texto || esperando) return;
+
+    esperando = true;
+    sendBtn.disabled = true;
+    inputEl.value = '';
+    inputEl.style.height = 'auto';
+
+    agregarMensaje(texto, 'user');
+    mostrarTyping();
+
+    try {
+      const res = await fetch(`${API_URL}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mensaje: texto, session_id: sessionId })
+      });
+
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+
+      const data = await res.json();
+      sessionId = data.session_id;
+
+      ocultarTyping();
+      agregarMensaje(data.respuesta, 'agent');
+
+    } catch (err) {
+      ocultarTyping();
+      agregarMensaje(`Error de conexión: ${err.message}. ¿Está el servidor arrancado?`, 'agent');
+    } finally {
+      esperando = false;
+      sendBtn.disabled = false;
+      inputEl.focus();
+    }
+  }
+
+  async function nuevaConversacion() {
+    if (sessionId) {
+      try {
+        await fetch(`${API_URL}/session/${sessionId}`, { method: 'DELETE' });
+      } catch (_) {}
+      sessionId = '';
+    }
+
+    chatEl.innerHTML = `
+      <div class="inner">
+        <div class="welcome" id="welcome">
+          <svg viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <circle cx="50" cy="50" r="46" stroke="#f5c518" stroke-width="2" opacity="0.4"/>
+            <path d="M4 50 Q4 4 50 4 Q96 4 96 50" fill="#f5c518" opacity="0.08"/>
+            <line x1="4" y1="50" x2="96" y2="50" stroke="#f5c518" stroke-width="2" opacity="0.4"/>
+            <circle cx="50" cy="50" r="12" fill="#0a0a0f" stroke="#f5c518" stroke-width="2" opacity="0.4"/>
+            <circle cx="50" cy="50" r="5" fill="#f5c518" opacity="0.4"/>
+          </svg>
+          <div class="welcome-title">Nueva sesión iniciada</div>
+          <div class="welcome-sub">
+            El historial anterior ha sido eliminado.<br/>
+            Puedes empezar una consulta nueva.
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  function scrollAbajo() {
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function escaparHTML(str) {
+    return str
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  inputEl.focus();
+</script>
+</body>
+</html>

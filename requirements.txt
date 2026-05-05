@@ -1,4 +1,8 @@
-groq
 python-dotenv
 requests
 duckduckgo-search
+chromadb
+sentence-transformers
+google-genai
+fastapi
+uvicorn

@@ -1,215 +1,247 @@
 import os
-import json
-import re
+import time
 from datetime import datetime
-from groq import Groq
+
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
+
 from herramientas import buscar_carta_pokemon, analizar_tendencia_inversion, buscar_en_internet
+from motor_rag import consultar_rag
 
 load_dotenv()
 
-# Definición de tools permitidas para el LLM
-HERRAMIENTAS_DISPONIBLES = [
-    {
-        "type": "function",
-        "function": {
-            "name": "buscar_carta_pokemon",
-            "description": "Busca datos en bruto de una carta Pokémon en la API oficial.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "nombre_carta": {"type": "string", "description": "SOLO el nombre del Pokémon (ej. 'Charizard'). NUNCA incluyas el nombre del set aquí."}
+MODELO_LLM = "gemini-2.5-flash"
+MAX_REINTENTOS_API = 4  # intentos ante error 503
+MAX_RONDAS_AGENT = 5    # rondas máximas de tool calling
+
+
+# ---------------------------------------------------------------------------
+# Definición de herramientas
+# ---------------------------------------------------------------------------
+
+HERRAMIENTAS_GEMINI = [
+    types.Tool(function_declarations=[
+        types.FunctionDeclaration(
+            name="buscar_carta_pokemon",
+            description="Busca datos en bruto de una carta Pokémon en la API oficial.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "nombre_carta": types.Schema(
+                        type="STRING",
+                        description="SOLO el nombre del Pokémon base (ej. 'Umbreon'). Extrae la palabra EXACTA que escribió el usuario. NUNCA lo cambies ni lo corrijas por otro Pokémon."
+                    )
                 },
-                "required": ["nombre_carta"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "analizar_tendencia_inversion",
-            "description": "Herramienta financiera suprema. Úsala para calcular el valor real, histórico y gradado (PSA/BGS) de una carta. Cruza la API con datos reales de internet.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "nombre_carta": {"type": "string", "description": "SOLO el nombre del Pokémon (ej. 'Charizard'). NUNCA incluyas el nombre del set aquí."}
+                required=["nombre_carta"]
+            )
+        ),
+        types.FunctionDeclaration(
+            name="analizar_tendencia_inversion",
+            description="Herramienta financiera suprema. Úsala para calcular el valor real, histórico y gradado (PSA/BGS) de una carta. Cruza la API con datos reales de internet.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "nombre_carta": types.Schema(
+                        type="STRING",
+                        description="SOLO el nombre del Pokémon base (ej. 'Umbreon'). Extrae la palabra EXACTA que escribió el usuario. NUNCA lo cambies ni lo corrijas por otro Pokémon."
+                    )
                 },
-                "required": ["nombre_carta"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "buscar_en_internet",
-            "description": "Buscar en internet noticias, ganadores de torneos o novedades.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "consulta": {"type": "string", "description": "Término de búsqueda (ej. noticias, campeonatos, torneos)"}
+                required=["nombre_carta"]
+            )
+        ),
+        types.FunctionDeclaration(
+            name="consultar_memoria_privada",
+            description="Busca en la memoria privada del usuario. Úsala SIEMPRE PRIMERO para consultar su colección de cartas actual, sus precios de compra o sus estrategias de torneo.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "consulta": types.Schema(
+                        type="STRING",
+                        description="Pregunta o término a buscar en la memoria privada (ej. 'precio Umbreon', 'reglas torneo')."
+                    )
                 },
-                "required": ["consulta"]
-            }
-        }
-    }
+                required=["consulta"]
+            )
+        ),
+        types.FunctionDeclaration(
+            name="buscar_en_internet",
+            description="Buscar en internet noticias, ganadores de torneos o novedades.",
+            parameters=types.Schema(
+                type="OBJECT",
+                properties={
+                    "consulta": types.Schema(
+                        type="STRING",
+                        description="Término de búsqueda (ej. noticias, campeonatos, torneos)"
+                    )
+                },
+                required=["consulta"]
+            )
+        )
+    ])
 ]
+
+
+# ---------------------------------------------------------------------------
+# Helper: llamada al modelo con retry ante 503
+# ---------------------------------------------------------------------------
+
+def _llamar_modelo(cliente, historial, config) -> any:
+    """
+    Envuelve generate_content con backoff exponencial para errores 503.
+    Esperas: 2s, 4s, 8s, 16s antes de rendirse.
+    """
+    for intento in range(MAX_REINTENTOS_API):
+        try:
+            return cliente.models.generate_content(
+                model=MODELO_LLM,
+                contents=historial,
+                config=config
+            )
+        except Exception as e:
+            es_503 = "503" in str(e) or "UNAVAILABLE" in str(e)
+            es_ultimo_intento = intento == MAX_REINTENTOS_API - 1
+
+            if es_503 and not es_ultimo_intento:
+                espera = 2 ** (intento + 1)  # 2s, 4s, 8s
+                print(f"[!] Servidor saturado. Reintentando en {espera}s... ({intento + 1}/{MAX_REINTENTOS_API - 1})")
+                time.sleep(espera)
+            else:
+                raise  # cualquier otro error o reintentos agotados: propagamos
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher de tools
+# ---------------------------------------------------------------------------
+
+def _ejecutar_tool_call(nombre: str, argumentos: dict) -> str:
+    if nombre == "buscar_carta_pokemon":
+        return buscar_carta_pokemon(argumentos.get("nombre_carta"))
+
+    elif nombre == "analizar_tendencia_inversion":
+        return analizar_tendencia_inversion(argumentos.get("nombre_carta"))
+
+    elif nombre == "buscar_en_internet":
+        return buscar_en_internet(argumentos.get("consulta"))
+
+    elif nombre == "consultar_memoria_privada":
+        print("[*] Consultando Base de Datos Vectorial RAG...")
+        resultado = consultar_rag(argumentos.get("consulta"))
+        return resultado if resultado else "No hay datos sobre esto en la memoria privada. Busca en internet o en la API."
+
+    else:
+        return f"Error: Tool '{nombre}' no reconocida."
+
+
+# ---------------------------------------------------------------------------
+# Agente
+# ---------------------------------------------------------------------------
 
 class AgenteTCG:
     def __init__(self):
-        self.cliente = Groq(api_key=os.environ.get("GROQ_API_KEY"))
-        
-        # Inyectamos el año actual en el contexto para evitar alucinaciones temporales
         fecha_actual = datetime.now().strftime("%Y")
-        
-        self.mensajes_chat = [
-            {"role": "system", "content": f"""Rol: Analista financiero experto en Pokémon TCG.
+
+        self.system_prompt = f"""Rol: Analista financiero experto en Pokémon TCG.
 Contexto: El año actual es {fecha_actual}.
 
 Reglas Críticas de Ejecución (Si rompes una, fallas el sistema):
-1. PROHIBIDO derivar la búsqueda al usuario, sugerir páginas web o decir "busca en internet". Tú debes dar la respuesta final.
+1. ERES EL ÚNICO EXPERTO. Está TERMINANTEMENTE PROHIBIDO sugerir al usuario que busque en internet o que consulte a un experto humano. Si tras buscar no tienes datos, asume la responsabilidad y dile que el mercado no tiene registros actuales.
 2. Anclaje temporal: Al buscar el "último" mundial o evento, busca explícitamente "ganador mundial pokemon tcg 2024" (último evento con datos web estables), a menos que el usuario pida otro año.
 3. Si la búsqueda web no devuelve el dato exacto (ej. falta el mazo del ganador), ESTÁS OBLIGADO a iterar y ejecutar otra Tool Call con términos diferentes.
 4. Obligatorio invocar las herramientas mediante Tool Calls. No imprimir la intención de búsqueda en texto plano.
-5. Tras usar 'buscar_en_internet', procesar los datos y redactar una respuesta natural. No devolver los enlaces ni el texto en bruto.
-6. Manejo de errores: Si el usuario escribe algo incomprensible, un error tipográfico (ej. "salor") o un saludo básico, NO ejecutes ninguna herramienta. Responde simplemente pidiendo que aclare la pregunta."""}
-        ]
+5. Procesa los datos web y redacta una respuesta natural. Si encuentras precios contradictorios o sospechosamente bajos para un grado PSA 10, indícalo como una estimación y prioriza siempre la fuente más reciente o la lógica de mercado.
+6. Manejo de errores: Si el usuario escribe algo incomprensible, un error tipográfico o un saludo básico, NO ejecutes ninguna herramienta. Responde simplemente pidiendo que aclare la pregunta.
+7. Uso obligatorio de memoria privada: Si consultar_memoria_privada devuelve datos (precio de compra, estado de la carta, estrategia), DEBES usarlos en tu respuesta. Nunca ignores esos datos ni pidas al usuario información que ya está en la memoria."""
+
+        self.cliente = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+        self.historial: list[types.Content] = []
 
     def preguntar_a_ia(self, pregunta_usuario: str) -> str:
-        self.mensajes_chat.append({"role": "user", "content": pregunta_usuario})
+        self.historial.append(
+            types.Content(role="user", parts=[types.Part(text=pregunta_usuario)])
+        )
+
+        config = types.GenerateContentConfig(
+            system_instruction=self.system_prompt,
+            tools=HERRAMIENTAS_GEMINI
+        )
 
         try:
-            respuesta = self.cliente.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=self.mensajes_chat,
-                tools=HERRAMIENTAS_DISPONIBLES,
-                tool_choice="auto"
-            )
-            
-            # choices devuelve una lista, extraemos el primer mensaje
-            mensaje_ia = respuesta.choices[0].message
-            
-            if getattr(mensaje_ia, 'tool_calls', None):
-                for tool_call in mensaje_ia.tool_calls:
-                    argumentos = json.loads(tool_call.function.arguments)
-                    
-                    if tool_call.function.name == "buscar_carta_pokemon":
-                        resultado_datos = buscar_carta_pokemon(argumentos.get("nombre_carta"))
-                    elif tool_call.function.name == "analizar_tendencia_inversion":
-                        resultado_datos = analizar_tendencia_inversion(argumentos.get("nombre_carta"))
-                    elif tool_call.function.name == "buscar_en_internet":
-                        resultado_datos = buscar_en_internet(argumentos.get("consulta"))
-                    else:
-                        resultado_datos = "Herramienta desconocida."
-                    
-                    self.mensajes_chat.append(mensaje_ia)
-                    self.mensajes_chat.append({
-                        "tool_call_id": tool_call.id,
-                        "role": "tool",
-                        "name": tool_call.function.name,
-                        "content": str(resultado_datos)
-                    })
-                    
-                    respuesta_final = self.cliente.chat.completions.create(
-                        model="llama-3.3-70b-versatile",
-                        messages=self.mensajes_chat
-                    )
-                    
-                    respuesta_texto = respuesta_final.choices[0].message.content
-                    self.mensajes_chat.append({"role": "assistant", "content": respuesta_texto})
-                    return respuesta_texto
-                    
-            respuesta_texto_normal = mensaje_ia.content
-            
-            # FIX 1: Alucinación de Tool Call (Texto plano o XML de Llama)
-            if respuesta_texto_normal and ('buscar_en_internet' in respuesta_texto_normal.lower() or '<function' in respuesta_texto_normal):
-                termino_busqueda = ""
-                
-                # Si usa el formato XML nativo de Llama (como el bug del Charizard)
-                if '<function' in respuesta_texto_normal:
-                    match = re.search(r'<function[^>]*>(.*?)</function>', respuesta_texto_normal, re.IGNORECASE)
-                    if match:
-                        # Limpiamos todos los símbolos de programación raros (+, comillas, paréntesis)
-                        termino_busqueda = re.sub(r'["\'\+\(\)\{\}\[\]:=]', ' ', match.group(1)).strip()
-                        termino_busqueda = termino_busqueda.replace("consulta", "").strip()
-                
-                # Si usa el formato de texto plano clásico
-                else:
-                    busqueda = re.search(r'consulta["\'\s:={\\]+([^"\'\}]+)', respuesta_texto_normal, re.IGNORECASE)
-                    if busqueda:
-                        termino_busqueda = busqueda.group(1).strip()
-                
-                if termino_busqueda:
-                    print(f"[*] Caza de alucinación XML exitosa. Buscando: {termino_busqueda}")
-                    resultado_datos = buscar_en_internet(termino_busqueda)
-                    
-                    texto_limpio = re.sub(r'<[^>]+>', '', respuesta_texto_normal).strip() 
-                    if not texto_limpio or "{" in texto_limpio or "(" in texto_limpio:
-                        texto_limpio = f"Ampliando información de mercado sobre: {termino_busqueda}"
-                        
-                    self.mensajes_chat.append({"role": "assistant", "content": texto_limpio})
-                    self.mensajes_chat.append({"role": "user", "content": f"Resultados web: {resultado_datos}\nSintetiza esto y dame una respuesta directa basada en los precios reales."})
-                    
-                    r_final = self.cliente.chat.completions.create(model="llama-3.3-70b-versatile", messages=self.mensajes_chat)
-                    txt_final = r_final.choices[0].message.content
-                    self.mensajes_chat.append({"role": "assistant", "content": txt_final})
-                    return txt_final
-                    
-            self.mensajes_chat.append({"role": "assistant", "content": respuesta_texto_normal})
-            return respuesta_texto_normal
+            for _ in range(MAX_RONDAS_AGENT):
+                respuesta = _llamar_modelo(self.cliente, self.historial, config)
+                candidato = respuesta.candidates[0]
 
-        # FIX 2: Groq lanza 400 Bad Request si el array de mensajes tiene una secuencia no válida.
+                tool_calls = [
+                    part for part in candidato.content.parts
+                    if part.function_call is not None
+                ]
+
+                if tool_calls:
+                    self.historial.append(candidato.content)
+
+                    partes_respuesta = []
+                    for part in tool_calls:
+                        fc = part.function_call
+                        argumentos = dict(fc.args) if fc.args else {}
+                        resultado = _ejecutar_tool_call(fc.name, argumentos)
+                        print(f"[*] Tool ejecutada: {fc.name}")
+
+                        partes_respuesta.append(
+                            types.Part(
+                                function_response=types.FunctionResponse(
+                                    name=fc.name,
+                                    response={"result": resultado}
+                                )
+                            )
+                        )
+
+                    self.historial.append(
+                        types.Content(role="user", parts=partes_respuesta)
+                    )
+                    continue
+
+                # Sin tool calls: respuesta final en texto
+                texto_final = "".join(
+                    part.text for part in candidato.content.parts
+                    if hasattr(part, 'text') and part.text
+                )
+
+                if texto_final:
+                    self.historial.append(
+                        types.Content(role="model", parts=[types.Part(text=texto_final)])
+                    )
+                    return texto_final
+
+                return "No se pudo generar una respuesta. Intenta de nuevo."
+
+            return "El agente alcanzó el límite de rondas de razonamiento."
+
         except Exception as e:
             error_str = str(e)
-            print(f"[!] Error de API. Posible estado corrupto, ejecutando rollback...")
-            
-            # Hacemos pop() del último input para no envenenar el contexto
-            if self.mensajes_chat and self.mensajes_chat[-1]["role"] == "user":
-                pregunta_original = self.mensajes_chat.pop()["content"]
-            else:
-                pregunta_original = "Sintetiza la información obtenida en la última consulta."
-                
-            if "failed_generation" in error_str:
-                busqueda = re.search(r'"consulta":\s*"([^"]+)"', error_str)
-                if busqueda:
-                    print("[*] Relanzando búsqueda desde los logs...")
-                    resultado_datos = buscar_en_internet(busqueda.group(1))
-                    
-                    # Contexto temporal para no romper la memoria principal
-                    mensajes_temporales = self.mensajes_chat.copy()
-                    mensajes_temporales.append({
-                        "role": "user", 
-                        "content": f"Usuario: '{pregunta_original}'.\nDatos extraídos: \n{resultado_datos}\n\nGenera una respuesta con estos datos sin incluir los enlaces."
-                    })
-                    
-                    r_final = self.cliente.chat.completions.create(model="llama-3.3-70b-versatile", messages=mensajes_temporales)
-                    txt_final = r_final.choices[0].message.content
-                    
-                    self.mensajes_chat.append({"role": "user", "content": pregunta_original})
-                    self.mensajes_chat.append({"role": "assistant", "content": txt_final})
-                    
-                    return txt_final
-            
-            return f"Error crítico (400). El contexto se ha reiniciado por seguridad. Log: {error_str[:60]}..."
+            print(f"[!] Error: {error_str}")
+            if self.historial and self.historial[-1].role == "user":
+                self.historial.pop()
+            return f"Error al procesar la solicitud. Intenta de nuevo. Log: {error_str[:80]}..."
+
 
 if __name__ == "__main__":
-    print("TCG Agent CLI v1.3.0")
+    print("TCG Agent CLI v2.2.0 (Gemini 2.5 Flash)")
     print("Escribe 'exit' para salir.\n")
-    
+
     agente = AgenteTCG()
-    
+
     while True:
         try:
             mi_pregunta = input("> ")
-            # Hemos añadido los errores tipográficos más comunes
-            if mi_pregunta.lower() in ("salir", "exit", "quit", "salor", "sañir", "q", "sair", "exir", "salr"):
+            if mi_pregunta.lower() in ("salir", "exit", "quit", "q"):
                 print("\n[*] Cerrando sesión...")
                 break
-            
+
             if not mi_pregunta.strip():
                 continue
-                
+
             print(f"\n{agente.preguntar_a_ia(mi_pregunta)}\n")
-            
+
         except KeyboardInterrupt:
             print("\n\n[*] Ejecución interrumpida por el usuario.")
             break
